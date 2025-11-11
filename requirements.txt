@@ -1,0 +1,12 @@
+# Core Data Science
+numpy>=1.24.0
+pandas>=2.0.0
+scipy>=1.10.0
+
+# Visualization
+plotly>=5.14.0
+dash>=2.14.0
+dash-bootstrap-components>=1.5.0
+
+# Production Web Server
+gunicorn>=21.2.0
