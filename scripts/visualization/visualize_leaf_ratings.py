@@ -671,11 +671,7 @@ app.layout = dbc.Container([
     dbc.Row([
         dbc.Col([
             html.Div("DUNCAN DRAFTS", className="eyebrow text-center"),
-            html.H1("QB LEAF Rating Explorer", className="text-center mb-2 hero-title"),
-            html.P(
-                "Twenty seasons of quarterback skill, estimated one game at a time — with honest uncertainty.",
-                className="text-center text-muted mb-4 hero-sub"
-            )
+            html.H1("QB LEAF Rating Explorer", className="text-center mb-4 hero-title")
         ])
     ]),
 
@@ -685,12 +681,12 @@ app.layout = dbc.Container([
             html.Div([
                 html.H3("What is LEAF Rating?", style={'marginBottom': '1rem'}),
                 html.P([
-                    "LEAF v3 is a walk-forward state-space QB rating: opponent-adjusted EPA filtered ",
+                    html.Span("LEAF — the Layered EPA Adaptive Framework — ", style={'fontWeight': '600'}),
+                    "is a walk-forward state-space QB rating: opponent-adjusted EPA filtered ",
                     "game by game (Kalman), with draft-pick priors, age curves, and a fusion of EPA, ",
                     "CPOE, and success rate. Every rating uses only games played before it — no hindsight. ",
                     html.Span("Honest out-of-sample accuracy: r = 0.47 for next-season EPA "
-                              "(frozen 2019–2025 test era) — at the measured information ceiling of public "
-                              "play-by-play data. Projection bands are calibrated 80% intervals "
+                              "(frozen 2019–2025 test era). Projection bands are calibrated 80% intervals "
                               "(77% actual coverage on held-out seasons).",
                               style={'fontWeight': '600'}),
                 ], style={'marginBottom': '0', 'fontSize': '1.05rem'})
