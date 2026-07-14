@@ -620,12 +620,13 @@ app.layout = dbc.Container([
             dcc.RadioItems(
                 id='player-status-filter',
                 options=[
-                    {'label': ' Active Players', 'value': 'active'},
-                    {'label': ' Retired Players', 'value': 'retired'}
+                    {'label': f' All ({len(qb_data)})', 'value': 'all'},
+                    {'label': f' Active ({len(active_qbs)})', 'value': 'active'},
+                    {'label': f' Retired ({len(retired_qbs)})', 'value': 'retired'}
                 ],
-                value='active',
+                value='all',
                 inline=True,
-                className="mb-3"
+                className="mb-3 status-radio"
             )
         ], width=12)
     ]),
@@ -727,11 +728,15 @@ def update_dropdown_options(player_status):
     """Update dropdown options based on active/retired filter."""
     if player_status == 'active':
         qb_list = active_qbs
-        label_format = lambda row: f"{row['player_name']} ({row['leaf_rating']:.3f})"
-    else:  # retired
+        label_format = lambda row: f"{row['player_name']} ({row['leaf_rating']:+.3f})"
+    elif player_status == 'retired':
         qb_list = retired_qbs
-        # Show career LEAF for retired players
-        label_format = lambda row: f"{row['player_name']} (Career: {row['leaf_rating']:.3f})"
+        label_format = lambda row: f"{row['player_name']} ({row['leaf_rating']:+.3f} · {int(row['last_season'])})"
+    else:  # all
+        qb_list = pd.concat([active_qbs, retired_qbs]).sort_values('leaf_rating', ascending=False)
+        label_format = (lambda row: f"{row['player_name']} ({row['leaf_rating']:+.3f})"
+                        if row['status'] == 'active'
+                        else f"{row['player_name']} ({row['leaf_rating']:+.3f} · last {int(row['last_season'])})")
 
     options = [
         {'label': label_format(row), 'value': row['player_id']}
@@ -794,7 +799,8 @@ def update_visualizations(player_id, prediction_years, player_status):
     seasons = player_games['season'].nunique()
 
     # Check if player is retired
-    is_retired = (player_status == 'retired')
+    last_played = int(player_games['season'].max()) if len(player_games) else 0
+    is_retired = last_played < 2024
 
     if is_retired:
         # For retired players, show career span and additional stats
