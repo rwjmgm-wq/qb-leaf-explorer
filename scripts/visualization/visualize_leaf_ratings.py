@@ -280,221 +280,115 @@ def calculate_predictions(player_games, years_forward=[1, 2, 3]):
 
     return pd.DataFrame(predictions)
 
+BRAND = '#e52673'          # Duncan Drafts accent
+INK_MUTED = '#8d99a5'      # raw-observation dots
+GRID = '#eef1f4'
+BASELINE = '#c6ccd2'
+
+
 def create_player_trajectory_figure(player_games, predictions, player_name, is_retired=False):
     """
-    Create interactive figure showing historical trajectory and predictions.
-
-    Args:
-        player_games: Game-by-game records
-        predictions: Future predictions DataFrame
-        player_name: Player name for title
-        is_retired: Whether the player is retired (affects labeling)
-
-    Returns:
-        Plotly figure
+    Career trajectory: raw game EPA (muted dots), the Kalman state estimate
+    (brand line) with its own calibrated 80% band, and the multi-year
+    projection with widening calibrated intervals.
     """
-    subtitle = f"{player_name} - LEAF Rating Trajectory"
-    if is_retired:
-        subtitle += " (Retired)"
+    fig = go.Figure()
+    x = player_games['game_number'] if 'game_number' in player_games.columns         else pd.Series(range(1, len(player_games) + 1), index=player_games.index)
 
-    fig = make_subplots(
-        rows=1, cols=1,
-        subplot_titles=[subtitle]
-    )
+    state = player_games['opp_adj_base_epa_kalman']
+    sd = player_games['opp_adj_base_epa_uncertainty']
 
-    # Historical trajectory - individual games
-    fig.add_trace(
-        go.Scatter(
-            x=player_games.index,
-            y=player_games['opp_adj_base_epa_kalman'],
-            mode='markers',
-            name='Game Performance',
-            marker=dict(size=8, color='#1f77b4', opacity=0.6),
-            hovertemplate=(
-                '<b>Game %{x}</b><br>' +
-                'Season: %{customdata[0]}<br>' +
-                'Week: %{customdata[1]}<br>' +
-                'Rating: %{y:.3f}<br>' +
-                'Opponent: %{customdata[2]}<br>' +
-                '<extra></extra>'
-            ),
-            customdata=player_games[['season', 'week', 'defteam']].values
-        )
-    )
+    # --- calibrated state band (80%) -------------------------------------
+    fig.add_trace(go.Scatter(
+        x=x, y=state + 1.28 * sd, mode='lines',
+        line=dict(width=0), showlegend=False, hoverinfo='skip'))
+    fig.add_trace(go.Scatter(
+        x=x, y=state - 1.28 * sd, mode='lines',
+        line=dict(width=0), fill='tonexty', fillcolor='rgba(229,38,115,0.10)',
+        name='80% confidence', legendrank=2, hoverinfo='skip'))
 
-    # Smoothed trendline (rolling 8-game average)
-    window = min(8, len(player_games))
-    smoothed = None
-    trend_end_value = player_games['opp_adj_base_epa_kalman'].iloc[-1]  # Default to last game
+    # --- raw per-game observations (recessive) ----------------------------
+    if 'game_epa' in player_games.columns:
+        fig.add_trace(go.Scatter(
+            x=x, y=player_games['game_epa'], mode='markers',
+            name='Game EPA (raw)', legendrank=1,
+            marker=dict(size=5, color=INK_MUTED, opacity=0.45,
+                        line=dict(width=0)),
+            hovertemplate=('<b>Game %{x}</b><br>%{customdata[0]} wk %{customdata[1]}'
+                           ' vs %{customdata[2]}<br>Game EPA: %{y:.3f}<extra></extra>'),
+            customdata=player_games[['season', 'week', 'defteam']].values))
 
-    if len(player_games) >= 3:
-        smoothed = player_games['opp_adj_base_epa_kalman'].rolling(window=window, min_periods=1, center=False).mean()
-        rolling_std = player_games['opp_adj_base_epa_kalman'].rolling(window=window, min_periods=1, center=False).std()
+    # --- the state estimate: the hero mark ---------------------------------
+    fig.add_trace(go.Scatter(
+        x=x, y=state, mode='lines', name='LEAF skill estimate', legendrank=3,
+        line=dict(color=BRAND, width=2.5),
+        hovertemplate=('<b>Game %{x}</b><br>Skill estimate: %{y:.3f}'
+                       ' &plusmn; %{customdata[0]:.3f}<extra></extra>'),
+        customdata=np.column_stack([1.28 * sd])))
 
-        # Get the smoothed value at the end for prediction connection
-        # This now matches the trend line since we're not using center=True
-        trend_end_value = smoothed.iloc[-1]
-
-        # Upper confidence band
-        fig.add_trace(
-            go.Scatter(
-                x=player_games.index,
-                y=smoothed + 1.5 * rolling_std,
-                mode='lines',
-                line=dict(width=0),
-                showlegend=False,
-                hoverinfo='skip'
-            )
-        )
-
-        # Lower confidence band
-        fig.add_trace(
-            go.Scatter(
-                x=player_games.index,
-                y=smoothed - 1.5 * rolling_std,
-                mode='lines',
-                line=dict(width=0),
-                fillcolor='rgba(31, 119, 180, 0.15)',
-                fill='tonexty',
-                name='Trend Range',
-                hoverinfo='skip'
-            )
-        )
-
-        # Smoothed trendline
-        fig.add_trace(
-            go.Scatter(
-                x=player_games.index,
-                y=smoothed,
-                mode='lines',
-                name='Trend (8-game avg)',
-                line=dict(color='#1f77b4', width=3),
-                hovertemplate=(
-                    '<b>Game %{x}</b><br>' +
-                    'Smoothed Rating: %{y:.3f}<br>' +
-                    '<extra></extra>'
-                )
-            )
-        )
-
-    # Future predictions
+    # --- projection --------------------------------------------------------
     if len(predictions) > 0:
-        last_game_idx = len(player_games) - 1
+        x_last = x.iloc[-1]
+        m_last = state.iloc[-1]
+        sd_last = sd.iloc[-1]
+        pred_x = [x_last] + [x_last + y * 17 for y in predictions['years_forward']]
+        pred_y = [m_last] + predictions['predicted_rating'].tolist()
 
-        # Create prediction x-values (extend beyond historical data)
-        games_per_year = 16
-        pred_x = [last_game_idx] + [last_game_idx + (years * games_per_year)
-                                     for years in predictions['years_forward']]
-        pred_y = [trend_end_value] + predictions['predicted_rating'].tolist()
+        fig.add_trace(go.Scatter(
+            x=pred_x, y=[m_last + 1.28 * sd_last] + predictions['upper_bound'].tolist(),
+            mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
+        fig.add_trace(go.Scatter(
+            x=pred_x, y=[m_last - 1.28 * sd_last] + predictions['lower_bound'].tolist(),
+            mode='lines', line=dict(width=0), fill='tonexty',
+            fillcolor='rgba(229,38,115,0.06)', name='Projection 80% band', legendrank=5,
+            hoverinfo='skip'))
+        fig.add_trace(go.Scatter(
+            x=pred_x, y=pred_y, mode='lines+markers', name='Projection', legendrank=4,
+            line=dict(color=BRAND, width=2, dash='dot'),
+            marker=dict(size=7, symbol='diamond', color='white',
+                        line=dict(color=BRAND, width=1.5)),
+            hovertemplate=('<b>%{customdata[0]} projection</b><br>'
+                           'Rating: %{y:.3f} &plusmn; %{customdata[1]:.3f}<extra></extra>'),
+            customdata=np.column_stack([
+                [int(player_games['season'].iloc[-1])] + predictions['predicted_season'].tolist(),
+                [1.28 * sd_last] + (1.28 * predictions['predicted_uncertainty']).tolist()])))
 
-        # Prediction line
-        fig.add_trace(
-            go.Scatter(
-                x=pred_x,
-                y=pred_y,
-                mode='lines+markers',
-                name='Predicted Rating',
-                line=dict(color='#ff7f0e', width=2, dash='dash'),
-                marker=dict(size=8, symbol='diamond'),
-                hovertemplate=(
-                    '<b>Prediction</b><br>' +
-                    'Season: %{customdata[0]}<br>' +
-                    'Rating: %{y:.3f}<br>' +
-                    'Uncertainty: ±%{customdata[1]:.3f}<br>' +
-                    '<extra></extra>'
-                ),
-                customdata=np.column_stack([
-                    predictions['predicted_season'],
-                    predictions['predicted_uncertainty']
-                ])
-            )
-        )
+    # --- reference guides ---------------------------------------------------
+    fig.add_hline(y=0, line_width=1, line_dash='dot', line_color=BASELINE,
+                  annotation_text='league avg', annotation_position='top right',
+                  annotation_font=dict(size=11, color=INK_MUTED))
+    fig.add_hline(y=0.15, line_width=1, line_dash='dot', line_color=BASELINE, opacity=0.6,
+                  annotation_text='elite', annotation_position='top right',
+                  annotation_font=dict(size=11, color=INK_MUTED))
 
-        # Prediction uncertainty bands
-        fig.add_trace(
-            go.Scatter(
-                x=pred_x,
-                y=[trend_end_value + 1.96 * player_games['opp_adj_base_epa_uncertainty'].iloc[-1]] +
-                  predictions['upper_bound'].tolist(),
-                mode='lines',
-                line=dict(width=0),
-                showlegend=False,
-                hoverinfo='skip'
-            )
-        )
+    y_all = list(state) + (list(player_games['game_epa']) if 'game_epa' in player_games.columns else [])
+    lo = float(np.floor(min(min(y_all), -0.2) * 5) / 5)
+    hi = float(np.ceil(max(max(y_all), 0.25) * 5) / 5)
+    tick_vals = [round(v, 1) for v in np.arange(lo, hi + 1e-9, 0.2)]
+    tick_text = [f'{v:+.1f}' if v != 0 else '0' for v in tick_vals]
 
-        fig.add_trace(
-            go.Scatter(
-                x=pred_x,
-                y=[trend_end_value - 1.96 * player_games['opp_adj_base_epa_uncertainty'].iloc[-1]] +
-                  predictions['lower_bound'].tolist(),
-                mode='lines',
-                line=dict(width=0),
-                fillcolor='rgba(255, 127, 14, 0.2)',
-                fill='tonexty',
-                name='Prediction Confidence',
-                hoverinfo='skip'
-            )
-        )
+    title = f"{player_name}"
+    if is_retired:
+        title += "  ·  retired"
 
-    # Add reference line at 0 (average QB)
-    fig.add_hline(y=0, line_dash="dot", line_color="gray",
-                  annotation_text="Average QB", annotation_position="right")
-
-    # Add elite/poor reference lines
-    fig.add_hline(y=0.15, line_dash="dot", line_color="green", opacity=0.5,
-                  annotation_text="Elite", annotation_position="right")
-    fig.add_hline(y=-0.10, line_dash="dot", line_color="red", opacity=0.5,
-                  annotation_text="Poor", annotation_position="right")
-
-    # For retired players, add career statistics annotation
-    if is_retired and len(player_games) > 0:
-        career_avg = player_games['opp_adj_base_epa_kalman'].mean()
-        career_best = player_games['opp_adj_base_epa_kalman'].max()
-        career_seasons = player_games['season'].nunique()
-        first_season = int(player_games['season'].min())
-        last_season = int(player_games['season'].max())
-
-        annotation_text = (
-            f"<b>Career Summary ({first_season}-{last_season})</b><br>"
-            f"Career Average: {career_avg:+.3f}<br>"
-            f"Career Best: {career_best:+.3f}<br>"
-            f"Seasons: {career_seasons}"
-        )
-
-        fig.add_annotation(
-            xref="paper", yref="paper",
-            x=0.02, y=0.98,
-            text=annotation_text,
-            showarrow=False,
-            align="left",
-            bgcolor="rgba(255, 255, 255, 0.8)",
-            bordercolor="gray",
-            borderwidth=1,
-            font=dict(size=10)
-        )
-
-    # Layout
     fig.update_layout(
-        height=600,
-        hovermode='x unified',
-        xaxis_title="Game Number (Career)",
-        yaxis_title="LEAF Rating (EPA per Play)",
-        template="plotly_white",
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1,
-            font=dict(size=11)
-        ),
-        # Mobile responsive settings
-        margin=dict(l=60, r=20, t=80, b=60),
-        # Better for embedding in blog posts
-        autosize=True
+        title=dict(text=title, font=dict(family='Roboto, sans-serif', size=18,
+                                         color='#15171A'), x=0.01, xanchor='left'),
+        height=560,
+        hovermode='closest',
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='white',
+        font=dict(family='Roboto, sans-serif', size=12, color='#4a5560'),
+        xaxis=dict(title='Career game', showgrid=False, zeroline=False,
+                   linecolor=BASELINE, ticks='outside', tickcolor=BASELINE),
+        yaxis=dict(title='Opponent-adjusted EPA / play', gridcolor=GRID,
+                   zeroline=False, tickmode='array',
+                   tickvals=tick_vals, ticktext=tick_text),
+        legend=dict(orientation='h', yanchor='bottom', y=1.01, xanchor='right', x=1,
+                    traceorder='normal', font=dict(size=11)),
+        margin=dict(l=60, r=24, t=64, b=52),
+        autosize=True,
     )
-
     return fig
 
 # Initialize Dash app with custom styling
@@ -568,19 +462,53 @@ app.index_string = '''
                 border-color: var(--border-color);
             }
 
-            /* Info section styling */
+            /* Info section: quiet card with a brand rule, no gradient */
             .info-section {
-                background: linear-gradient(135deg, #667eea 0%, var(--accent-color) 100%);
-                color: white;
+                background: var(--bg-white);
+                color: var(--text-primary);
+                border: 1px solid var(--border-color);
+                border-left: 4px solid var(--accent-color);
                 border-radius: 8px;
-                padding: 2rem;
+                padding: 1.5rem 2rem;
                 margin-bottom: 2rem;
+                box-shadow: var(--card-shadow);
             }
 
             .info-section h3 {
-                color: white;
-                margin-bottom: 1rem;
+                color: var(--text-primary);
+                font-size: 1.15rem;
+                letter-spacing: 0.01em;
+                margin-bottom: 0.75rem;
             }
+
+            .info-section p { color: #4a5560; line-height: 1.6; }
+            .info-section span { color: var(--text-primary); }
+
+            .eyebrow {
+                font-family: 'Roboto', sans-serif;
+                font-size: 0.72rem;
+                font-weight: 700;
+                letter-spacing: 0.22em;
+                color: var(--accent-color);
+                margin-bottom: 0.4rem;
+            }
+
+            .hero-title { font-size: 2.4rem; letter-spacing: -0.01em; }
+            .hero-sub { font-size: 1.05rem; max-width: 46rem; margin-left: auto; margin-right: auto; }
+
+            .footer-rule { border-color: var(--border-color); margin-top: 2.5rem; }
+            .footer-line {
+                font-family: 'Roboto', sans-serif;
+                font-size: 0.8rem;
+                color: var(--text-secondary);
+                margin-bottom: 0.25rem;
+            }
+            .footer-brand { color: var(--accent-color); font-weight: 700; }
+            .footer-link { color: var(--accent-color); text-decoration: none; font-weight: 500; }
+            .footer-link:hover { text-decoration: underline; }
+
+            /* Numbers align in tables/cards */
+            .card-body, .stat-badge { font-variant-numeric: tabular-nums; }
 
             /* Stat badges */
             .stat-badge {
@@ -658,12 +586,11 @@ app.layout = dbc.Container([
     # Header
     dbc.Row([
         dbc.Col([
-            html.H1("QB LEAF Rating Explorer", className="text-center mb-2",
-                   style={'fontWeight': '700', 'fontSize': '2.5rem'}),
+            html.Div("DUNCAN DRAFTS", className="eyebrow text-center"),
+            html.H1("QB LEAF Rating Explorer", className="text-center mb-2 hero-title"),
             html.P(
-                "Explore quarterback performance with data-driven ratings from 2006-2025",
-                className="text-center text-muted mb-4",
-                style={'fontSize': '1.1rem'}
+                "Twenty seasons of quarterback skill, estimated one game at a time — with honest uncertainty.",
+                className="text-center text-muted mb-4 hero-sub"
             )
         ])
     ]),
@@ -773,28 +700,23 @@ app.layout = dbc.Container([
         ])
     ]),
 
+    # Footer
     dbc.Row([
         dbc.Col([
-            html.Hr(style={'marginTop': '3rem', 'marginBottom': '2rem'}),
-            html.Div([
-                html.P([
-                    html.Strong("Data Source: "),
-                    "nflfastR play-by-play data (2006-2025 seasons) • ",
-                    html.Strong("Model: "),
-                    "LEAF v2.0 Multi-Feature Rating System • ",
-                    html.Strong("Validation: "),
-                    "r=0.41 correlation to future performance"
-                ], className="text-center text-muted", style={'marginBottom': '0.5rem'}),
-                html.P([
-                    "Created by ",
-                    html.A("Duncan Drafts", href="https://duncan-drafts.ghost.io",
-                          target="_blank", style={'color': '#e52673', 'textDecoration': 'none', 'fontWeight': '600'}),
-                    " • Data-driven NFL analysis and prospect evaluation"
-                ], className="text-center text-muted small")
-            ], style={'paddingBottom': '2rem'})
+            html.Hr(className="footer-rule"),
+            html.P([
+                html.Span("LEAF v3", className="footer-brand"),
+                html.Span(" · walk-forward Kalman state-space model · "),
+                html.Span("out-of-sample r = 0.47 next-season EPA · calibrated 80% intervals"),
+            ], className="footer-line text-center"),
+            html.P([
+                html.Span(f"Data through the latest completed week · updates weekly · "),
+                html.A("Duncan Drafts", href="https://duncan-drafts.ghost.io",
+                       className="footer-link", target="_blank"),
+            ], className="footer-line text-center"),
         ])
-    ])
-], fluid=True, className="p-4")
+    ], className="mt-4"),
+], fluid=True, className="p-4 main-container")
 
 @app.callback(
     [Output('player-dropdown', 'options'),

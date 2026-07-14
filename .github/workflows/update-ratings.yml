@@ -1,0 +1,38 @@
+name: Weekly LEAF v3 Rating Update
+
+on:
+  schedule:
+    - cron: '0 11 * * 2'   # Tuesdays 11:00 UTC (after MNF, before the next slate)
+  workflow_dispatch:        # manual trigger from the Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  update-ratings:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pandas numpy nfl_data_py pyarrow
+
+      - name: Rebuild ratings (fetch pbp -> LEAF v3 engine -> app exports)
+        run: python pipeline/update_all.py
+
+      - name: Commit refreshed ratings
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "LEAF v3 Weekly Update"
+          git add data/production/leaf_v3_*.csv data/production/leaf_v3_params.json \
+                  data/production/last_update.txt data/raw/player_meta.csv
+          git diff --staged --quiet || git commit -m "Weekly LEAF v3 rating update [$(date +'%Y-%m-%d')]"
+          git push
