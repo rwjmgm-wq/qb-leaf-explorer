@@ -37,8 +37,9 @@ def load_ratings_data():
     """Load LEAF ratings from production files."""
     logger.info("Loading LEAF ratings data...")
 
-    # Load game-by-game ratings
-    game_files = sorted(DATA_DIR.glob("leaf_v2_game_by_game_*.csv"))
+    # Load game-by-game ratings (LEAF v3: walk-forward, leakage-free -
+    # see DARKO_NFL/docs/LEAF_V3_RESULTS.md)
+    game_files = sorted(DATA_DIR.glob("leaf_v3_game_by_game_*.csv"))
     if not game_files:
         raise FileNotFoundError("No game-by-game ratings file found")
 
@@ -46,7 +47,7 @@ def load_ratings_data():
     logger.info(f"  Loaded {len(game_data):,} game records")
 
     # Load current ratings
-    current_files = sorted(DATA_DIR.glob("leaf_v2_current_ratings_*.csv"))
+    current_files = sorted(DATA_DIR.glob("leaf_v3_current_ratings_*.csv"))
     if not current_files:
         raise FileNotFoundError("No current ratings file found")
 
@@ -208,109 +209,73 @@ def split_active_retired_qbs(qb_data_df, game_data_df):
 
     return active_qbs, retired_qbs
 
+import json as _json
+
+def _load_v3_params():
+    try:
+        with open(DATA_DIR / 'leaf_v3_params.json') as f:
+            return _json.load(f)
+    except Exception:
+        return {}
+
+V3_PARAMS = _load_v3_params()
+
+
 def calculate_predictions(player_games, years_forward=[1, 2, 3]):
     """
-    Calculate future rating predictions based on current trajectory.
+    Calibrated multi-year projections from the LEAF v3 state-space model.
 
-    Args:
-        player_games: Game-by-game records for player
-        years_forward: List of years to predict (e.g., [1, 2, 3])
-
-    Returns:
-        DataFrame with predictions
+    Point projection: filtered state + train-era age drift (u25 improve,
+    25-32 flat-ish, 33+ decline), advancing the QB's age each year.
+    Uncertainty: state variance + skill-change variance x years + one-season
+    sampling noise. These components were calibrated on 2006-2018 and
+    validated on frozen 2019-2025 data (80% nominal -> 77% actual coverage).
+    Replaces the previous trend-extrapolation + hand-tuned regression logic,
+    whose career-stage rates were fit on data affected by the constant
+    leaf_rating bug (docs/LEAF_DATA_BUG_INVESTIGATION.md).
     """
     if len(player_games) == 0:
         return pd.DataFrame()
 
-    # Get current rating and recent trend
-    recent_games = player_games.tail(10)
     current_rating = player_games['opp_adj_base_epa_kalman'].iloc[-1]
-    current_uncertainty = player_games['opp_adj_base_epa_uncertainty'].iloc[-1]
+    state_var = player_games['opp_adj_base_epa_uncertainty'].iloc[-1] ** 2
+    age = player_games['age'].iloc[-1] if 'age' in player_games.columns else np.nan
 
-    # Calculate trend from recent games (linear regression)
-    # NOTE: Trends are dampened heavily since short-term noise shouldn't predict long-term
-    if len(recent_games) >= 3:
-        x = np.arange(len(recent_games))
-        y = recent_games['opp_adj_base_epa_kalman'].values
-        trend_per_game = np.polyfit(x, y, 1)[0]  # Slope per game
+    drift = V3_PARAMS.get('age_drift', {'u25': 0.009, '25_32': -0.007, 'o32': -0.019})
+    pint = V3_PARAMS.get('predictive_interval', {})
+    skill_change_var = pint.get('skill_change_var', 0.0009)
+    play_noise_var = pint.get('play_noise_var', 4.24)
+    season_plays = 500.0
 
-        # Dampen trend: only apply 20% of recent trend (trends fade)
-        # Cap at ±0.02 per year (prevents extreme extrapolation)
-        trend_annual = np.clip(trend_per_game * 16 * 0.2, -0.02, 0.02)
-    else:
-        trend_annual = 0.0
+    def yearly_drift(a):
+        if np.isnan(a):
+            return 0.0
+        if a < 25:
+            return drift['u25']
+        if a < 32:
+            return drift['25_32']
+        return drift['o32']
 
-    # DATA-DRIVEN career stage adjustments (from analyze_qb_career_trajectories.py)
-    # QB Career Trajectory (based on 5,145 games from 79 qualified starting QBs):
-    #   Games 0-48: Improve +0.0153/season (R²=0.922)
-    #   Games 48-96: Improve +0.0190/season (R²=0.989) - ACCELERATING development!
-    #   Peak at Games 104-111 (Year 6-7) - QBs peak LATEST of all positions
-    #   Games 111+: Decline -0.0069/season (R²=0.697) - Very slow decline
-
-    total_games = len(player_games)
-
-    # Generate predictions
     predictions = []
-    last_season = player_games['season'].iloc[-1]
-    last_week = player_games['week'].iloc[-1]
-
+    last_season = int(player_games['season'].iloc[-1])
     for years in years_forward:
-        # Calculate career stage adjustment based on FUTURE games played
-        future_games = total_games + (years * 16)
+        # accumulate drift one year at a time so the age bracket can change
+        m, a = current_rating, age
+        for _ in range(int(years)):
+            m = m + yearly_drift(a)
+            a = a + 1 if not np.isnan(a) else a
 
-        # Determine career stage improvement/decline rate
-        if total_games < 48:
-            # Early career - steady improvement phase (QBs develop slowly)
-            career_adjustment = 0.0153 * years
-        elif total_games < 96:
-            # Mid career - ACCELERATED improvement toward peak
-            career_adjustment = 0.0190 * years
-        elif total_games < 111:
-            # Peak years - maintain elite performance
-            career_adjustment = 0.0 * years
-        else:
-            # Post-peak - very gradual decline (QBs age gracefully)
-            career_adjustment = -0.0069 * years
-
-        # If player will cross into new career stage during prediction window, blend rates
-        if total_games < 48 and future_games > 48:
-            games_in_early = 48 - total_games
-            games_in_mid = future_games - 48
-            career_adjustment = (games_in_early / 16) * 0.0153 + (games_in_mid / 16) * 0.0190
-        elif total_games < 96 and future_games > 96:
-            games_in_mid = 96 - total_games
-            games_in_peak = future_games - 96
-            career_adjustment = (games_in_mid / 16) * 0.0190 + (games_in_peak / 16) * 0.0
-        elif total_games < 111 and future_games > 111:
-            games_in_peak = 111 - total_games
-            games_in_decline = future_games - 111
-            career_adjustment = (games_in_peak / 16) * 0.0 + (games_in_decline / 16) * (-0.0069)
-
-        # Base prediction: current + career stage adjustment + dampened recent trend
-        predicted_rating = current_rating + career_adjustment + (trend_annual * years)
-
-        # Uncertainty increases with time
-        uncertainty_multiplier = 1 + (0.4 * years)  # 40% increase per year
-        predicted_uncertainty = current_uncertainty * uncertainty_multiplier
-
-        # Add regression to mean (elite QBs tend to decline, poor QBs improve)
-        # Stronger regression: 20% per year (mean reversion is real in NFL)
-        regression_factor = 0.20 * years
-        regression_factor = min(regression_factor, 0.5)  # Cap at 50% regression
-        mean_rating = 0.03  # Average QB ~0.03 EPA (slightly below 0.05 to be conservative)
-        predicted_rating = predicted_rating * (1 - regression_factor) + mean_rating * regression_factor
-
-        # Sanity check: Cap predictions at reasonable bounds
-        # Elite max: 0.20, Poor min: -0.15
-        predicted_rating = np.clip(predicted_rating, -0.15, 0.20)
+        # observed-season variance at this horizon (skill walk + sampling noise)
+        var = state_var + skill_change_var * years + play_noise_var / season_plays
+        sd = np.sqrt(var)
 
         predictions.append({
             'years_forward': years,
             'predicted_season': last_season + years,
-            'predicted_rating': predicted_rating,
-            'predicted_uncertainty': predicted_uncertainty,
-            'lower_bound': predicted_rating - 1.96 * predicted_uncertainty,
-            'upper_bound': predicted_rating + 1.96 * predicted_uncertainty
+            'predicted_rating': m,
+            'predicted_uncertainty': sd,
+            'lower_bound': m - 1.28 * sd,   # 80% interval (validated coverage)
+            'upper_bound': m + 1.28 * sd,
         })
 
     return pd.DataFrame(predictions)
@@ -709,11 +674,14 @@ app.layout = dbc.Container([
             html.Div([
                 html.H3("What is LEAF Rating?", style={'marginBottom': '1rem'}),
                 html.P([
-                    "LEAF (Latent Evaluation of Aggregated Fundamentals) is a multi-feature QB rating system that predicts ",
-                    html.Span("future performance", style={'fontWeight': '600'}),
-                    ". ",
-                    html.A("Learn more →", href="#", id="learn-more-link",
-                          style={'color': 'white', 'textDecoration': 'underline', 'fontWeight': '500'})
+                    "LEAF v3 is a walk-forward state-space QB rating: opponent-adjusted EPA filtered ",
+                    "game by game (Kalman), with draft-pick priors, age curves, and a fusion of EPA, ",
+                    "CPOE, and success rate. Every rating uses only games played before it — no hindsight. ",
+                    html.Span("Honest out-of-sample accuracy: r = 0.47 for next-season EPA "
+                              "(frozen 2019–2025 test era) — at the measured information ceiling of public "
+                              "play-by-play data. Projection bands are calibrated 80% intervals "
+                              "(77% actual coverage on held-out seasons).",
+                              style={'fontWeight': '600'}),
                 ], style={'marginBottom': '0', 'fontSize': '1.05rem'})
             ], className="info-section")
         ])
