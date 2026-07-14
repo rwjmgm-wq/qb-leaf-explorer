@@ -280,6 +280,47 @@ def calculate_predictions(player_games, years_forward=[1, 2, 3]):
 
     return pd.DataFrame(predictions)
 
+# --- team colors (nflverse, static) -------------------------------------
+def _load_team_colors():
+    try:
+        t = pd.read_csv(Path('data/raw/team_colors.csv'))
+        return {r.team_abbr: (r.team_color, r.team_color2) for r in t.itertuples()}
+    except Exception:
+        return {}
+
+TEAM_COLORS = _load_team_colors()
+
+def _luminance(hex_color):
+    h = hex_color.lstrip('#')
+    r, g, b = (int(h[i:i+2], 16) / 255 for i in (0, 2, 4))
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+def team_color(team, fallback='#e52673'):
+    """Primary team color, falling back to secondary if too light for white."""
+    c1, c2 = TEAM_COLORS.get(team, (None, None))
+    if not isinstance(c1, str):
+        return fallback
+    if _luminance(c1) > 0.72 and isinstance(c2, str):
+        return c2
+    return c1
+
+def _hex_to_rgba(hex_color, alpha):
+    h = hex_color.lstrip('#')
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f'rgba({r},{g},{b},{alpha})'
+
+def team_stints(player_games):
+    """Consecutive same-team runs: list of (team, start_idx, end_idx) inclusive."""
+    teams = player_games['posteam'].fillna('').values
+    stints = []
+    start = 0
+    for i in range(1, len(teams) + 1):
+        if i == len(teams) or teams[i] != teams[start]:
+            stints.append((teams[start], start, i - 1))
+            start = i
+    return stints
+
+
 BRAND = '#e52673'          # Duncan Drafts accent
 INK_MUTED = '#8d99a5'      # raw-observation dots
 GRID = '#eef1f4'
@@ -294,18 +335,37 @@ def create_player_trajectory_figure(player_games, predictions, player_name, is_r
     """
     fig = go.Figure()
     x = player_games['game_number'] if 'game_number' in player_games.columns         else pd.Series(range(1, len(player_games) + 1), index=player_games.index)
+    x = x.reset_index(drop=True)
 
-    state = player_games['opp_adj_base_epa_kalman']
-    sd = player_games['opp_adj_base_epa_uncertainty']
+    state = player_games['opp_adj_base_epa_kalman'].reset_index(drop=True)
+    sd = player_games['opp_adj_base_epa_uncertainty'].reset_index(drop=True)
 
-    # --- calibrated state band (80%) -------------------------------------
-    fig.add_trace(go.Scatter(
-        x=x, y=state + 1.28 * sd, mode='lines',
-        line=dict(width=0), showlegend=False, hoverinfo='skip'))
-    fig.add_trace(go.Scatter(
-        x=x, y=state - 1.28 * sd, mode='lines',
-        line=dict(width=0), fill='tonexty', fillcolor='rgba(229,38,115,0.10)',
-        name='80% confidence', legendrank=2, hoverinfo='skip'))
+    stints = team_stints(player_games)
+    last_team = stints[-1][0] if stints else ''
+    last_color = team_color(last_team)
+
+    # --- stint-colored state band + line (segments connect at boundaries) ---
+    first = True
+    for team, a, b in stints:
+        lo = max(0, a - 1)          # include previous point so segments join
+        seg = slice(lo, b + 1)
+        c = team_color(team)
+        fig.add_trace(go.Scatter(
+            x=x[seg], y=(state + 1.28 * sd)[seg], mode='lines',
+            line=dict(width=0), showlegend=False, hoverinfo='skip'))
+        fig.add_trace(go.Scatter(
+            x=x[seg], y=(state - 1.28 * sd)[seg], mode='lines',
+            line=dict(width=0), fill='tonexty', fillcolor=_hex_to_rgba(c, 0.13),
+            name='80% confidence', legendrank=2, showlegend=first,
+            legendgroup='band', hoverinfo='skip'))
+        fig.add_trace(go.Scatter(
+            x=x[seg], y=state[seg], mode='lines',
+            name='LEAF skill estimate', legendrank=3, showlegend=first,
+            legendgroup='state', line=dict(color=c, width=2.5),
+            hovertemplate=('<b>Game %{x}</b> · ' + (team or '')
+                           + '<br>Skill estimate: %{y:.3f} &plusmn; %{customdata[0]:.3f}<extra></extra>'),
+            customdata=np.column_stack([1.28 * sd[seg]])))
+        first = False
 
     # --- raw per-game observations (recessive) ----------------------------
     if 'game_epa' in player_games.columns:
@@ -318,15 +378,23 @@ def create_player_trajectory_figure(player_games, predictions, player_name, is_r
                            ' vs %{customdata[2]}<br>Game EPA: %{y:.3f}<extra></extra>'),
             customdata=player_games[['season', 'week', 'defteam']].values))
 
-    # --- the state estimate: the hero mark ---------------------------------
-    fig.add_trace(go.Scatter(
-        x=x, y=state, mode='lines', name='LEAF skill estimate', legendrank=3,
-        line=dict(color=BRAND, width=2.5),
-        hovertemplate=('<b>Game %{x}</b><br>Skill estimate: %{y:.3f}'
-                       ' &plusmn; %{customdata[0]:.3f}<extra></extra>'),
-        customdata=np.column_stack([1.28 * sd])))
+    # --- tenure strip along the plot floor ---------------------------------
+    for team, a, b in stints:
+        if not team:
+            continue
+        c = team_color(team)
+        fig.add_shape(type='rect', xref='x', yref='paper',
+                      x0=x[a] - 0.5, x1=x[b] + 0.5, y0=0.02, y1=0.062,
+                      fillcolor=c, line=dict(color='white', width=1),
+                      layer='above', opacity=1.0)
+        if (b - a) >= 8:
+            fig.add_annotation(xref='x', yref='paper',
+                               x=(x[a] + x[b]) / 2, y=0.041, yanchor='middle',
+                               text=f'<b>{team}</b>', showarrow=False,
+                               font=dict(size=9, color='white',
+                                         family='Roboto, sans-serif'))
 
-    # --- projection --------------------------------------------------------
+    # --- projection (last team's color) -------------------------------------
     if len(predictions) > 0:
         x_last = x.iloc[-1]
         m_last = state.iloc[-1]
@@ -340,13 +408,13 @@ def create_player_trajectory_figure(player_games, predictions, player_name, is_r
         fig.add_trace(go.Scatter(
             x=pred_x, y=[m_last - 1.28 * sd_last] + predictions['lower_bound'].tolist(),
             mode='lines', line=dict(width=0), fill='tonexty',
-            fillcolor='rgba(229,38,115,0.06)', name='Projection 80% band', legendrank=5,
-            hoverinfo='skip'))
+            fillcolor=_hex_to_rgba(last_color, 0.08),
+            name='Projection 80% band', legendrank=5, hoverinfo='skip'))
         fig.add_trace(go.Scatter(
             x=pred_x, y=pred_y, mode='lines+markers', name='Projection', legendrank=4,
-            line=dict(color=BRAND, width=2, dash='dot'),
+            line=dict(color=last_color, width=2, dash='dot'),
             marker=dict(size=7, symbol='diamond', color='white',
-                        line=dict(color=BRAND, width=1.5)),
+                        line=dict(color=last_color, width=1.5)),
             hovertemplate=('<b>%{customdata[0]} projection</b><br>'
                            'Rating: %{y:.3f} &plusmn; %{customdata[1]:.3f}<extra></extra>'),
             customdata=np.column_stack([
@@ -363,10 +431,12 @@ def create_player_trajectory_figure(player_games, predictions, player_name, is_r
                   annotation_font=dict(size=12, color='#8a6d1c'),
                   annotation_bgcolor='rgba(255,255,255,0.85)')
 
-    y_all = list(state) + (list(player_games['game_epa']) if 'game_epa' in player_games.columns else [])
-    lo = float(np.floor(min(min(y_all), -0.2) * 5) / 5)
-    hi = float(np.ceil(max(max(y_all), 0.25) * 5) / 5)
-    tick_vals = [round(v, 1) for v in np.arange(lo, hi + 1e-9, 0.2)]
+    dots = (player_games['game_epa'] if 'game_epa' in player_games.columns else state)
+    lo = max(-0.8, float(min(dots.quantile(0.02), state.min() - 0.1, -0.25)))
+    hi = min(1.1, float(max(dots.quantile(0.98), state.max() + 0.1, 0.25)))
+    lo = float(np.floor(lo * 5) / 5) - 0.08   # head-room for the tenure strip
+    hi = float(np.ceil(hi * 5) / 5)
+    tick_vals = [round(v, 1) for v in np.arange(np.ceil(lo * 5) / 5, hi + 1e-9, 0.2)]
     tick_text = [f'{v:+.1f}' if v != 0 else '0' for v in tick_vals]
 
     title = f"{player_name}"
@@ -384,7 +454,7 @@ def create_player_trajectory_figure(player_games, predictions, player_name, is_r
         xaxis=dict(title='Career game', showgrid=False, zeroline=False,
                    linecolor=BASELINE, ticks='outside', tickcolor=BASELINE),
         yaxis=dict(title='Opponent-adjusted EPA / play', gridcolor=GRID,
-                   zeroline=False, tickmode='array',
+                   zeroline=False, tickmode='array', range=[lo, hi],
                    tickvals=tick_vals, ticktext=tick_text),
         legend=dict(orientation='h', yanchor='bottom', y=1.01, xanchor='right', x=1,
                     traceorder='normal', font=dict(size=11)),
@@ -508,6 +578,18 @@ app.index_string = '''
             .footer-brand { color: var(--accent-color); font-weight: 700; }
             .footer-link { color: var(--accent-color); text-decoration: none; font-weight: 500; }
             .footer-link:hover { text-decoration: underline; }
+
+            .team-chip {
+                display: inline-block;
+                font-family: 'Roboto', sans-serif;
+                font-size: 0.75rem;
+                font-weight: 700;
+                letter-spacing: 0.06em;
+                color: white;
+                padding: 0.15rem 0.55rem;
+                border-radius: 4px;
+                margin-right: 0.35rem;
+            }
 
             /* Numbers align in tables/cards */
             .card-body, .stat-badge { font-variant-numeric: tabular-nums; }
@@ -810,14 +892,25 @@ def update_visualizations(player_id, prediction_years, player_status):
         first_season = int(player_games['season'].min())
         last_season = int(player_games['season'].max())
 
+        team_chip = html.Span(
+            qb_team or '—',
+            className="team-chip",
+            style={'backgroundColor': team_color(qb_team) if qb_team else '#8d99a5'}
+        )
         career_stats_content = html.Div([
-            html.P(f"Career: {first_season}-{last_season}", className="mb-1"),
+            html.P([team_chip, html.Span(f" Career: {first_season}-{last_season}")], className="mb-1"),
             html.P(f"Total Games: {total_games}", className="mb-1"),
             html.P(f"Total Attempts: {total_attempts:,}", className="mb-1"),
             html.P(f"Seasons Played: {seasons}", className="mb-0")
         ])
     else:
+        team_chip = html.Span(
+            qb_team or '—',
+            className="team-chip",
+            style={'backgroundColor': team_color(qb_team) if qb_team else '#8d99a5'}
+        )
         career_stats_content = html.Div([
+            html.P([team_chip, html.Span(f" {int(recent_game['season'])} season" if recent_game is not None else "")], className="mb-1"),
             html.P(f"Total Games: {total_games}", className="mb-1"),
             html.P(f"Total Attempts: {total_attempts:,}", className="mb-1"),
             html.P(f"Seasons Played: {seasons}", className="mb-0")
