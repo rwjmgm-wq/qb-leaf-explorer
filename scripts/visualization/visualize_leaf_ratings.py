@@ -354,12 +354,14 @@ def create_player_trajectory_figure(player_games, predictions, player_name, is_r
                 [1.28 * sd_last] + (1.28 * predictions['predicted_uncertainty']).tolist()])))
 
     # --- reference guides ---------------------------------------------------
-    fig.add_hline(y=0, line_width=1, line_dash='dot', line_color=BASELINE,
-                  annotation_text='league avg', annotation_position='top right',
-                  annotation_font=dict(size=11, color=INK_MUTED))
-    fig.add_hline(y=0.15, line_width=1, line_dash='dot', line_color=BASELINE, opacity=0.6,
-                  annotation_text='elite', annotation_position='top right',
-                  annotation_font=dict(size=11, color=INK_MUTED))
+    fig.add_hline(y=0, line_width=1.5, line_dash='dash', line_color='#6f7a87',
+                  annotation_text='<b>league average</b>', annotation_position='top right',
+                  annotation_font=dict(size=12, color='#4a5560'),
+                  annotation_bgcolor='rgba(255,255,255,0.85)')
+    fig.add_hline(y=0.15, line_width=1.5, line_dash='dash', line_color='#b08d2f',
+                  annotation_text='<b>elite</b>', annotation_position='top right',
+                  annotation_font=dict(size=12, color='#8a6d1c'),
+                  annotation_bgcolor='rgba(255,255,255,0.85)')
 
     y_all = list(state) + (list(player_games['game_epa']) if 'game_epa' in player_games.columns else [])
     lo = float(np.floor(min(min(y_all), -0.2) * 5) / 5)
@@ -647,7 +649,7 @@ app.layout = dbc.Container([
             )
         ], width=12, lg=6),
 
-        dbc.Col([
+        dbc.Col(id="prediction-controls", children=[
             html.Label("Prediction Years:", className="fw-bold"),
             dcc.Checklist(
                 id='prediction-years',
@@ -754,7 +756,8 @@ def update_dropdown_options(player_status):
      Output('rating-interpretation', 'children'),
      Output('career-stats', 'children'),
      Output('next-season-pred', 'children'),
-     Output('trajectory-plot', 'figure')],
+     Output('trajectory-plot', 'figure'),
+     Output('prediction-controls', 'style')],
     [Input('player-dropdown', 'value'),
      Input('prediction-years', 'value'),
      Input('player-status-filter', 'value')]
@@ -851,8 +854,10 @@ def update_visualizations(player_id, prediction_years, player_status):
     # Create trajectory figure
     fig = create_player_trajectory_figure(player_games, predictions, player_name, is_retired=is_retired)
 
+    pred_controls_style = {'display': 'none'} if is_retired else {}
+
     return (rating_text, rating_color, interpretation,
-            career_stats_content, pred_content, fig)
+            career_stats_content, pred_content, fig, pred_controls_style)
 
 def main():
     """Run the visualization app."""
