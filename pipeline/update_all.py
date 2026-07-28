@@ -128,8 +128,14 @@ def export_app_files():
     for old in list(prod.glob('leaf_v3_game_by_game_*.csv')) + list(prod.glob('leaf_v3_current_ratings_*.csv')):
         old.unlink()
 
-    games.to_csv(prod / f'leaf_v3_game_by_game_{stamp}.csv', index=False)
-    current.to_csv(prod / f'leaf_v3_current_ratings_{stamp}.csv', index=False)
+    # 6dp on floats: full repr differs in the last bits between numpy builds,
+    # so an unrounded export rewrites all ~12k rows every run (~5MB of git
+    # history a week for data that barely changed). Far more precision than
+    # any displayed or downstream use needs.
+    games.to_csv(prod / f'leaf_v3_game_by_game_{stamp}.csv', index=False,
+                 float_format='%.6f')
+    current.to_csv(prod / f'leaf_v3_current_ratings_{stamp}.csv', index=False,
+                   float_format='%.6f')
     with open(prod / 'last_update.txt', 'w') as f:
         f.write(f'{datetime.now().isoformat()}\n{len(games)} QB-games, {len(current)} QBs\n')
     print(f'    {len(games):,} game rows, {len(current)} QBs (stamp {stamp})')
