@@ -174,10 +174,12 @@ def fit_age_drift(df):
     """Train-era within-QB year-over-year change in weighted adj EPA, by age."""
     rows = []
     for pid, g in df[df['season'] <= TRAIN_MAX_SEASON].groupby('passer_player_id'):
-        seas = g.groupby('season').apply(
+        # explicit column subset instead of include_groups= (that kwarg needs
+        # pandas >= 2.2; nfl_data_py pins 1.5.3 in CI)
+        seas = g[['season', 'adj_epa', 'plays', 'age']].groupby('season')[
+            ['adj_epa', 'plays', 'age']].apply(
             lambda s: pd.Series({'epa': np.average(s['adj_epa'], weights=s['plays']),
-                                 'plays': s['plays'].sum(), 'age': s['age'].mean()}),
-            include_groups=False)
+                                 'plays': s['plays'].sum(), 'age': s['age'].mean()}))
         seas = seas[seas['plays'] >= 150]
         years = sorted(seas.index)
         for y0, y1 in zip(years, years[1:]):
@@ -229,8 +231,8 @@ def add_baselines(df, ewma_halflife):
             col[tup[0]] = tup[j]
         df[name] = col
     # B2: previous season mean
-    seas = df.groupby(['passer_player_id', 'season']).apply(
-        lambda s: np.average(s['epa'], weights=s['plays']), include_groups=False).rename('season_epa').reset_index()
+    seas = df.groupby(['passer_player_id', 'season'])[['epa', 'plays']].apply(
+        lambda s: np.average(s['epa'], weights=s['plays'])).rename('season_epa').reset_index()
     seas['season'] += 1
     df = df.merge(seas, on=['passer_player_id', 'season'], how='left').rename(columns={'season_epa': 'b2_prev_season'})
     return df

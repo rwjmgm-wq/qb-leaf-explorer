@@ -15,15 +15,21 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
+      # nfl_data_py 0.3.3 pins pandas<2, so CI resolves to pandas 1.5.3 while
+      # local dev runs 2.x. Pinned here so the engine is exercised against a
+      # known pair; engine code avoids pandas-2-only APIs either way.
       - name: Install dependencies
-        run: pip install pandas numpy nfl_data_py pyarrow
+        run: pip install "pandas==1.5.3" "numpy==1.26.4" "nfl_data_py==0.3.3" pyarrow
+
+      - name: Verify engine reproduces frozen parameters
+        run: python pipeline/verify_engine.py
 
       - name: Rebuild ratings (fetch pbp -> LEAF v3 engine -> app exports)
         run: python pipeline/update_all.py
