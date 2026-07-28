@@ -53,12 +53,27 @@ def refresh_game_data():
             ['game_id', 'game_date', 'season', 'week', 'passer_player_id',
              'passer_player_name', 'posteam', 'defteam', 'qb_epa', 'cpoe',
              'success', 'pass_attempt']].dropna(subset=['qb_epa'])
+        # passer_player_name is NOT a grouping key: nflverse spells the same
+        # player_id inconsistently within a single game (name variants like
+        # "M.Ryan"/"Ryan", and the old "(3rd QB)" suffix), which would split
+        # one QB-game into two partial rows. Group on identity, then attach
+        # the most frequent name for that id.
         g = p.groupby(['game_id', 'game_date', 'season', 'week',
-                       'passer_player_id', 'passer_player_name', 'posteam', 'defteam']).agg(
+                       'passer_player_id', 'posteam', 'defteam']).agg(
             qb_epa_mean=('qb_epa', 'mean'), qb_epa_sum=('qb_epa', 'sum'),
             qb_epa_count=('qb_epa', 'size'), cpoe_mean=('cpoe', 'mean'),
             success_mean=('success', 'mean'), attempts=('pass_attempt', 'sum'),
         ).reset_index()
+        clean = p[~p['passer_player_name'].str.contains(r'\(3rd QB\)', na=False)]
+        names = (clean.groupby('passer_player_id')['passer_player_name']
+                 .agg(lambda s: s.mode().iat[0] if len(s.mode()) else s.iat[0]))
+        fallback = p.groupby('passer_player_id')['passer_player_name'].first()
+        g['passer_player_name'] = (g['passer_player_id'].map(names)
+                                   .fillna(g['passer_player_id'].map(fallback)))
+        g = g[['game_id', 'game_date', 'season', 'week', 'passer_player_id',
+               'passer_player_name', 'posteam', 'defteam', 'qb_epa_mean',
+               'qb_epa_sum', 'qb_epa_count', 'cpoe_mean', 'success_mean',
+               'attempts']]
         frames.append(g)
         print(f'    {season}: {len(g)} QB-games')
         del df, p
